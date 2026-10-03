@@ -6,7 +6,13 @@ services:
       POSTGRES_USER: sanat
       POSTGRES_PASSWORD: solitaire
     container_name: stampede-db
-    command: ["postgres", "-c", "max_connections=200"]
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_preload_libraries=pg_stat_statements # per-query timing after a run
+    shm_size: 256mb
     ports:
       - 5434:5432
     volumes:
@@ -20,6 +26,6 @@ services:
     depends_on:
       - db
     command: ["-path", "/migrations", "-database", "postgresql://sanat:solitaire@db:5432/stampede?sslmode=disable", "up"]
-    
+
 volumes:
   db_data:

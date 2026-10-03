@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: stampede
+      POSTGRES_USER: sanat
+      POSTGRES_PASSWORD: solitaire
+    container_name: stampede-db
+    command: ["postgres", "-c", "max_connections=200"]
+    ports:
+      - 5434:5432
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  migrate:
+    image: migrate/migrate:latest
+    container_name: stampede-migrate
+    volumes:
+      - ./db/migrations:/migrations
+    depends_on:
+      - db
+    command: ["-path", "/migrations", "-database", "postgresql://sanat:solitaire@db:5432/stampede?sslmode=disable", "up"]
+    
+volumes:
+  db_data:

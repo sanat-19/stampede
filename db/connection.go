@@ -1,6 +1,8 @@
 package db
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -9,9 +11,10 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
-const defaultMaxConns = 20
+const defaultMaxConns = 100
 
 func ConnectPostgres() (*gorm.DB, error) {
 	dsn := os.Getenv("DATABASE_URL")
@@ -28,7 +31,16 @@ func ConnectPostgres() (*gorm.DB, error) {
 		maxConns = n
 	}
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	logLevel, err := gormLogLevel(os.Getenv("DB_LOG_LEVEL"))
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		SkipDefaultTransaction: true,                             // transactions are managed explicitly; no implicit tx per write
+		PrepareStmt:            true,                             // cache prepared statements per connection
+		Logger:                 logger.Default.LogMode(logLevel), // silent by default: under load, printing slow queries costs CPU and skews results
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -45,4 +57,47 @@ func ConnectPostgres() (*gorm.DB, error) {
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	return db, nil
+}
+
+// gormLogLevel maps DB_LOG_LEVEL (silent, error, warn, info) to GORM's logger.
+// Default is silent; booking errors are still logged by the HTTP handler.
+func gormLogLevel(v string) (logger.LogLevel, error) {
+	switch v {
+	case "", "silent":
+		return logger.Silent, nil
+	case "error":
+		return logger.Error, nil
+	case "warn":
+		return logger.Warn, nil
+	case "info":
+		return logger.Info, nil
+	}
+	return 0, fmt.Errorf("invalid DB_LOG_LEVEL %q (want silent, error, warn or info)", v)
+}
+
+// Warm opens every connection the pool allows so the sale spike does not pay
+// connection setup cost. All connections are held at once (otherwise the pool
+// would keep reusing one), then returned to the idle pool.
+func Warm(ctx context.Context, gdb *gorm.DB) error {
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		return err
+	}
+
+	n := sqlDB.Stats().MaxOpenConnections
+	conns := make([]*sql.Conn, 0, n)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+
+	for range n {
+		c, err := sqlDB.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("warm connection %d/%d: %w", len(conns)+1, n, err)
+		}
+		conns = append(conns, c)
+	}
+	return nil
 }

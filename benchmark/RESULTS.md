@@ -35,6 +35,47 @@ Column notes:
   while the counter update also writes it. The event row is hot twice: FK check + counter.
 - The k6 run was stopped by hand at 4m27s, after the sell-out.
 
+## Phase 2a — hot row removed (step 1: counter out of the transaction)
+
+Change: the booking transaction no longer reads or updates `events.remaining`. It is now insert booking →
+claim tickets → commit. The ticket rows alone prevent overselling. The sold-out flag is set when a claim comes
+up short **and** no committed ticket is still available. `/availability` counts available tickets.
+The `bookings.event_id` foreign key is still in place (step 2).
+
+| Run | Pool | Peak RPS | Short-circuit | Peak booked/s | Avg booked/s | p99 (booked) | booked | already_booked | sold_out | timeout_pool | timeout_db | Ambiguous | k6 dropped | Unsold | Sold out after |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2a-1 | 20 | 5000 | on | 1,894 | 743 | 1.97 s | 40,043 | 169 | 1,558 | 332,371 | 5,870 | 69 | 12,174 (3%) | 0 | 53s |
+| 2a-2 | 20 | 5000 | on | 1,808 | 908 | 1.97 s | 39,888 | 194 | 2,430 | 132,689 | 5,163 | 52 | 10,787 (5.6%) | 0 | 43s |
+
+### 2a-1 notes (2026-10-05)
+
+- **vs baseline-1:** sold out in **53 s instead of 2m20s**; peak **1,894 bookings/s vs 618 (3.1×)**, average
+  743 vs 283 (2.6×). Code change only — no schema or infrastructure change.
+- **Invariants:** all 8 passed with no counter at all: bookings = tickets = 1,00,000, 0 unsold. The ticket
+  rows alone prevent overselling.
+- **Still overloaded:** demand (up to 5,000 req/s) is still above capacity (~1,900 bookings/s), so 87% of
+  requests were `timeout_pool`. k6 stopped at sell-out (`STOP_ON_SOLD_OUT`), so almost the whole run was the
+  overloaded peak — unlike baseline-1, whose percentages include minutes of cheap post-sell-out `sold_out`.
+  Compare the bookings/s columns, not the outcome percentages.
+- **Machine saturation:** 280 `client_error` (no answer in 5 s), `timeout_db` answers up to 4.98 s despite the
+  2 s deadline, and 3% k6 dropped iterations — k6, Go and Postgres competing for the laptop's CPU.
+- **Ambiguous timeouts:** 69 (vs 26), consistent with late answers from the saturated machine.
+- **Caveat found after the run:** k6's stop-on-sold-out check called `/availability` once per `sold_out`
+  answer — 1,558 calls (http_reqs − iterations). They bunched up at the sell-out and competed for the same
+  20-connection pool with no deadline (waiting up to k6's 5 s), which explains the 5 s client timeouts,
+  `timeout_db` answers up to 4.98 s, and the test running ~97 s for a 53 s sale. Fixed before 2a-2: the server now
+  returns `event_sold_out: true` and k6 stops on it with no extra requests; `/availability` has a 2 s deadline.
+- **Remaining suspects** for the next limit: the `bookings.event_id` FK lock on event row 1 (MultiXact), all
+  claims hitting the lowest ticket ids (same index/heap pages), commit fsync. Wait snapshots not captured.
+
+### 2a-2 notes (2026-10-05)
+
+- Clean run: k6 stopped at 45 s on `event_sold_out`, no `/availability` traffic. 0 `client_error`, slowest
+  `timeout_db` 2.08 s (deadline respected). The whole sale fit inside the 40 s peak window.
+- Sold out in **43 s**; peak 1,808 bookings/s (consistent with 2a-1's 1,894), average **908**/s.
+- 8,895 requests were in flight when k6 stopped and are not in the outcome counts; ambiguous was still only 52.
+- All 8 invariants passed; 0 unsold.
+
 ## Commands
 
 Full run: reset → migrate → seed → restart API → k6 → verify → bookings/s query.

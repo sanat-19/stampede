@@ -2,7 +2,10 @@
 // requests arrive on schedule whether or not the server has answered.
 //
 //   0 → PEAK_RPS in 10 s, hold 30 s, decay to 10% over 2 min, hold 10% to DURATION_MIN.
+//
+// The test stops early once the event is sold out (STOP_ON_SOLD_OUT=false to run the full duration).
 import http from 'k6/http';
+import exec from 'k6/execution';
 import { Counter, Trend } from 'k6/metrics';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.2/index.js';
 
@@ -15,6 +18,7 @@ const EVENT_ID = parseInt(__ENV.EVENT_ID || '1', 10);
 const PRE_VUS = parseInt(__ENV.PRE_VUS || String(PEAK_RPS), 10);
 const MAX_VUS = parseInt(__ENV.MAX_VUS || String(PEAK_RPS * 5), 10);
 const SUMMARY_FILE = __ENV.SUMMARY_FILE || '';
+const STOP_ON_SOLD_OUT = (__ENV.STOP_ON_SOLD_OUT || 'true') !== 'false';
 
 const LOW_RPS = Math.max(1, Math.round(PEAK_RPS * 0.1));
 const TAIL_S = Math.max(0, Math.round(DURATION_MIN * 60) - 160);
@@ -72,12 +76,18 @@ export default function () {
 
   counters[outcome].add(1);
   latency.add(res.timings.duration, { outcome });
+
+  // The server sets event_sold_out only once no ticket is left (a sold_out for
+  // asking 4 with 1–3 left does not have it), so one such answer ends the test.
+  if (outcome === 'sold_out' && STOP_ON_SOLD_OUT && res.json('event_sold_out') === true) {
+    exec.test.abort('all tickets sold out');
+  }
 }
 
 export function handleSummary(data) {
   const value = (name, field) => (data.metrics[name] ? data.metrics[name].values[field] : 0);
 
-  const total = value('http_reqs', 'count');
+  const total = OUTCOMES.reduce((sum, o) => sum + value(`outcome_${o}`, 'count'), 0);
   const lines = ['', '█ OUTCOMES', ''];
   for (const o of OUTCOMES) {
     const n = value(`outcome_${o}`, 'count');

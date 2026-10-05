@@ -10,11 +10,10 @@ import (
 
 func NewRouter(booker models.Booker) *mux.Router {
 	eventRepo := models.NewEventRepo(appconfig.DB)
-	eventHandler := api.NewEventHandler(eventRepo)
+	ticketRepo := models.NewTicketRepo(appconfig.DB)
+	eventHandler := api.NewEventHandler(eventRepo, ticketRepo)
 	bookHandler := api.NewBookHandler(booker, appconfig.Cfg.EventID, appconfig.Cfg.RequestTimeout)
 	opsHandler := api.NewOpsHandler(appconfig.DB)
-
-	// ticketRepo := models.NewTicketRepo(appconfig.DB)
 
 	r := mux.NewRouter()
 

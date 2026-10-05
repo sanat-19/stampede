@@ -36,6 +36,9 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to warm connection pool:", err)
 	}
+	if err := db.LogPoolStats(appconfig.DB); err != nil {
+		log.Fatal("Failed to read pool stats:", err)
+	}
 
 	booker := models.NewBookingRepo(appconfig.DB, cfg.SoldOutShortCircuit)
 

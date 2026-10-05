@@ -56,17 +56,19 @@ func main() {
 }
 
 func verify(db *gorm.DB, eventID int64) error {
+	// events.remaining is not checked: since Phase 2a bookings no longer update it,
+	// so the ticket rows are the source of truth for what was sold.
 	var event struct {
 		TotalTickets int64
-		Remaining    int64
 	}
-	if err := db.Raw(`SELECT total_tickets, remaining FROM events WHERE id = ?`, eventID).Scan(&event).Error; err != nil {
+	if err := db.Raw(`SELECT total_tickets FROM events WHERE id = ?`, eventID).Scan(&event).Error; err != nil {
 		return fmt.Errorf("load event: %w", err)
 	}
 
 	queries := map[string]string{
 		"sold_by_bookings": `SELECT coalesce(sum(qty), 0) FROM bookings WHERE event_id = ? AND status = 'confirmed'`,
 		"sold_by_tickets":  `SELECT count(*) FROM tickets WHERE event_id = ? AND status = 'sold'`,
+		"ticket_rows":      `SELECT count(*) FROM tickets WHERE event_id = ?`,
 		"held_tickets":     `SELECT count(*) FROM tickets WHERE event_id = ? AND status = 'held'`,
 		"sold_no_booking":  `SELECT count(*) FROM tickets WHERE event_id = ? AND status = 'sold' AND booking_id IS NULL`,
 		"avail_w_booking":  `SELECT count(*) FROM tickets WHERE event_id = ? AND status = 'available' AND booking_id IS NOT NULL`,
@@ -92,15 +94,14 @@ func verify(db *gorm.DB, eventID int64) error {
 		n[name] = v
 	}
 
-	soldByCounter := event.TotalTickets - event.Remaining
 	checks := []check{
-		{"sold_by_counter = sold_by_bookings = sold_by_tickets",
-			soldByCounter == n["sold_by_bookings"] && n["sold_by_bookings"] == n["sold_by_tickets"],
-			fmt.Sprintf("counter=%d bookings=%d tickets=%d", soldByCounter, n["sold_by_bookings"], n["sold_by_tickets"])},
-		{"remaining >= 0", event.Remaining >= 0, fmt.Sprint(event.Remaining)},
+		{"sold_by_bookings = sold_by_tickets", n["sold_by_bookings"] == n["sold_by_tickets"],
+			fmt.Sprintf("bookings=%d tickets=%d", n["sold_by_bookings"], n["sold_by_tickets"])},
+		{"ticket rows = total_tickets (none lost or added)", n["ticket_rows"] == event.TotalTickets,
+			fmt.Sprintf("%d = %d", n["ticket_rows"], event.TotalTickets)},
 		{"sold_by_tickets <= total_tickets", n["sold_by_tickets"] <= event.TotalTickets,
 			fmt.Sprintf("%d <= %d", n["sold_by_tickets"], event.TotalTickets)},
-		{"no held tickets (Phase 1 has no holds)", n["held_tickets"] == 0, fmt.Sprint(n["held_tickets"])},
+		{"no held tickets (no holds yet)", n["held_tickets"] == 0, fmt.Sprint(n["held_tickets"])},
 		{"every sold ticket has a booking_id", n["sold_no_booking"] == 0, fmt.Sprint(n["sold_no_booking"])},
 		{"every available ticket has NULL booking_id", n["avail_w_booking"] == 0, fmt.Sprint(n["avail_w_booking"])},
 		{"tickets per confirmed booking = qty", n["qty_mismatches"] == 0, fmt.Sprintf("%d mismatched bookings", n["qty_mismatches"])},

@@ -1,21 +1,23 @@
 package api
 
 import (
-	"errors"
+	"context"
 	"log/slog"
 	"net/http"
 	"stampede/models"
 	"strconv"
-
-	"gorm.io/gorm"
+	"time"
 )
 
+const availabilityTimeout = 2 * time.Second
+
 type EventHandler struct {
-	eventRepo *models.EventRepo
+	eventRepo  *models.EventRepo
+	ticketRepo *models.TicketRepo
 }
 
-func NewEventHandler(eventRepo *models.EventRepo) *EventHandler {
-	return &EventHandler{eventRepo: eventRepo}
+func NewEventHandler(eventRepo *models.EventRepo, ticketRepo *models.TicketRepo) *EventHandler {
+	return &EventHandler{eventRepo: eventRepo, ticketRepo: ticketRepo}
 }
 
 func (h *EventHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
@@ -24,7 +26,7 @@ func (h *EventHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// Availability serves GET /availability?event_id=1. Not used by the load test in Phase 1.
+// Availability serves GET /availability?event_id=1. Not used by the load test.
 func (h *EventHandler) Availability(w http.ResponseWriter, r *http.Request) {
 	eventID, err := strconv.ParseInt(r.URL.Query().Get("event_id"), 10, 64)
 	if err != nil {
@@ -32,14 +34,25 @@ func (h *EventHandler) Availability(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remaining, err := h.eventRepo.Remaining(r.Context(), eventID)
-	switch {
-	case errors.Is(err, gorm.ErrRecordNotFound):
+	// Same pool as bookings: bound the wait so a saturated pool cannot hang this endpoint.
+	ctx, cancel := context.WithTimeout(r.Context(), availabilityTimeout)
+	defer cancel()
+
+	exists, err := h.eventRepo.Exists(ctx, eventID)
+	if err == nil && !exists {
 		writeJSON(w, http.StatusNotFound, map[string]string{"outcome": "invalid", "error": "unknown event_id"})
-	case err != nil:
+		return
+	}
+
+	var remaining int64
+	if err == nil {
+		// Counted from the tickets themselves: events.remaining is no longer updated.
+		remaining, err = h.ticketRepo.CountAvailable(ctx, eventID)
+	}
+	if err != nil {
 		slog.Error("availability failed", "event_id", eventID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"outcome": "error"})
-	default:
-		writeJSON(w, http.StatusOK, map[string]int64{"event_id": eventID, "remaining": int64(remaining)})
+		return
 	}
+	writeJSON(w, http.StatusOK, map[string]int64{"event_id": eventID, "remaining": remaining})
 }

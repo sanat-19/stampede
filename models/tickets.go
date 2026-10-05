@@ -63,6 +63,28 @@ func (r *TicketRepo) Claim(tx *gorm.DB, eventID, bookingID int64, qty int) ([]st
 	return ticketNos, err
 }
 
+// AnyAvailable reports whether any committed ticket of the event is still available.
+func (r *TicketRepo) AnyAvailable(ctx context.Context, eventID int64) (bool, error) {
+	var ids []int64
+	err := r.db.WithContext(ctx).
+		Model(&Tickets{}).
+		Where("event_id = ? AND status = ?", eventID, TicketAvailable).
+		Limit(1).
+		Pluck("id", &ids).Error
+	return len(ids) > 0, err
+}
+
+// CountAvailable returns how many tickets of the event are still available.
+// It walks tickets_available_idx, so it gets cheaper as the sale progresses.
+func (r *TicketRepo) CountAvailable(ctx context.Context, eventID int64) (int64, error) {
+	var n int64
+	err := r.db.WithContext(ctx).
+		Model(&Tickets{}).
+		Where("event_id = ? AND status = ?", eventID, TicketAvailable).
+		Count(&n).Error
+	return n, err
+}
+
 // NumbersForBooking returns the ticket numbers belonging to a booking, in ticket order.
 func (r *TicketRepo) NumbersForBooking(ctx context.Context, bookingID int64) ([]string, error) {
 	var ticketNos []string

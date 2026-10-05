@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -57,6 +58,24 @@ func ConnectPostgres() (*gorm.DB, error) {
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	return db, nil
+}
+
+// LogPoolStats logs the connection pool's size and current use. Called once at
+// startup, after Warm, to confirm the pool is the size you configured.
+func LogPoolStats(gdb *gorm.DB) error {
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		return err
+	}
+
+	s := sqlDB.Stats()
+	slog.Info("db pool",
+		"max_open_connections", s.MaxOpenConnections, // DB_MAX_CONNS: upper limit of the pool
+		"open_connections", s.OpenConnections, // connections currently open (in use + idle)
+		"in_use", s.InUse, // connections handed out to queries right now
+		"idle", s.Idle, // open connections waiting to be reused
+	)
+	return nil
 }
 
 // gormLogLevel maps DB_LOG_LEVEL (silent, error, warn, info) to GORM's logger.

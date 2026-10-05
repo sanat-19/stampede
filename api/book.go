@@ -39,6 +39,8 @@ func (h *BookHandler) Book(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, models.BookResponse{Outcome: "already_booked", BookingID: res.BookingID, Tickets: res.Tickets})
 	case err == nil:
 		writeJSON(w, http.StatusCreated, models.BookResponse{Outcome: "booked", BookingID: res.BookingID, Tickets: res.Tickets})
+	case errors.Is(err, models.ErrEventSoldOut):
+		writeJSON(w, http.StatusConflict, models.BookResponse{Outcome: "sold_out", EventSoldOut: true})
 	case errors.Is(err, models.ErrSoldOut):
 		writeJSON(w, http.StatusConflict, models.BookResponse{Outcome: "sold_out"})
 	case errors.Is(err, models.ErrTimeoutPool):

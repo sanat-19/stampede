@@ -45,13 +45,19 @@ type BookResponse struct {
 	BookingID int64    `json:"booking_id,omitempty"`
 	Tickets   []string `json:"tickets,omitempty"`
 	Error     string   `json:"error,omitempty"`
+	// EventSoldOut is true on a sold_out when the whole event has no tickets
+	// left, so a client can stop retrying (the load test stops on it).
+	EventSoldOut bool `json:"event_sold_out,omitempty"`
 }
 
 // Booking outcomes other than success. The HTTP layer maps them to responses.
 var (
-	ErrSoldOut     = errors.New("sold out")
-	ErrTimeoutPool = errors.New("deadline exceeded waiting for a pool connection") // Postgres never saw the request
-	ErrTimeoutDB   = errors.New("deadline exceeded inside the transaction")        // may have committed; a retry replays it
+	ErrSoldOut = errors.New("sold out")
+	// ErrEventSoldOut is a sold_out where the event is known to have no tickets
+	// left (the sold-out flag is set). errors.Is(err, ErrSoldOut) is still true.
+	ErrEventSoldOut = fmt.Errorf("%w: event has no tickets left", ErrSoldOut)
+	ErrTimeoutPool  = errors.New("deadline exceeded waiting for a pool connection") // Postgres never saw the request
+	ErrTimeoutDB    = errors.New("deadline exceeded inside the transaction")        // may have committed; a retry replays it
 )
 
 type BookingResult struct {
@@ -72,14 +78,13 @@ const pgQueryCanceled = "57014"
 // BookingRepo is the Postgres-only Booker.
 type BookingRepo struct {
 	db           *gorm.DB
-	events       *EventRepo
 	tickets      *TicketRepo
 	shortCircuit bool
 	soldOut      sync.Map // eventID → struct{}; set once the event is known to be sold out
 }
 
 func NewBookingRepo(db *gorm.DB, shortCircuit bool) *BookingRepo {
-	return &BookingRepo{db: db, events: NewEventRepo(db), tickets: NewTicketRepo(db), shortCircuit: shortCircuit}
+	return &BookingRepo{db: db, tickets: NewTicketRepo(db), shortCircuit: shortCircuit}
 }
 
 // SoldOut reports whether the in-process sold-out flag is set for the event.
@@ -91,7 +96,7 @@ func (r *BookingRepo) SoldOut(eventID int64) bool {
 func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) (BookingResult, error) {
 	// Safe to reject without the DB: the flag can only reject, never approve.
 	if r.shortCircuit && r.SoldOut(eventID) {
-		return BookingResult{}, ErrSoldOut
+		return BookingResult{}, ErrEventSoldOut
 	}
 
 	// Begun manually rather than db.Transaction(fn) so a failure here — waiting for
@@ -127,40 +132,21 @@ func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) 
 		return r.replay(ctx, eventID, userID)
 	}
 
-	// Check the counter before touching the tickets table: if fewer than qty are
-	// left, reject without scanning for tickets. Unlocked read of the committed
-	// value — it only rejects early; the decrement below still enforces the limit.
-	left, err := r.events.RemainingTx(tx, eventID)
-	if err != nil {
-		return BookingResult{}, txError(ctx, "check remaining", err)
-	}
-	if left < qty {
-		if left == 0 {
-			r.soldOut.Store(eventID, struct{}{})
-		}
-		return BookingResult{}, ErrSoldOut
-	}
-
-	// Claim tickets. No partial fulfilment — fewer than qty means sold out.
+	// Claim tickets. This is the only guard against overselling: each ticket row
+	// can be claimed once (SKIP LOCKED + one booking_id slot). No shared counter
+	// row is touched, so concurrent bookings no longer queue behind each other.
+	// No partial fulfilment — fewer than qty means sold out.
 	ticketNos, err := r.tickets.Claim(tx, eventID, booking.ID, qty)
 	if err != nil {
 		return BookingResult{}, txError(ctx, "claim tickets", err)
 	}
 	if len(ticketNos) < qty {
-		return BookingResult{}, ErrSoldOut
-	}
-
-	// The hot counter, last, so its row lock is held for the shortest time.
-	var event Event
-	res = tx.Model(&event).
-		Clauses(clause.Returning{Columns: []clause.Column{{Name: "remaining"}}}).
-		Where("id = ? AND remaining >= ?", eventID, qty).
-		Update("remaining", gorm.Expr("remaining - ?", qty))
-	if res.Error != nil {
-		return BookingResult{}, txError(ctx, "decrement remaining", res.Error)
-	}
-	if res.RowsAffected == 0 {
-		r.soldOut.Store(eventID, struct{}{})
+		// Roll back first so this request never holds two connections.
+		tx.Rollback()
+		finished = true
+		if r.markSoldOutIfNoneLeft(ctx, eventID) {
+			return BookingResult{}, ErrEventSoldOut
+		}
 		return BookingResult{}, ErrSoldOut
 	}
 
@@ -169,13 +155,24 @@ func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) 
 	}
 	finished = true
 
-	// The counter only reaches 0 once every ticket is committed as sold, so this
-	// is the point where the event is definitely sold out.
-	if event.RemainingTickets == 0 {
-		r.soldOut.Store(eventID, struct{}{})
-	}
-
 	return BookingResult{BookingID: booking.ID, Tickets: ticketNos}, nil
+}
+
+// markSoldOutIfNoneLeft sets the sold-out flag only when no committed ticket is
+// still available. A short claim alone is not enough: SKIP LOCKED also skips
+// tickets that in-flight transactions hold and may still roll back. Those stay
+// 'available' to this read until they commit, so the flag is never set early.
+// It reports whether the event is sold out.
+func (r *BookingRepo) markSoldOutIfNoneLeft(ctx context.Context, eventID int64) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	left, err := r.tickets.AnyAvailable(ctx, eventID)
+	if err != nil || left {
+		return false
+	}
+	r.soldOut.Store(eventID, struct{}{})
+	return true
 }
 
 // replay returns the user's existing booking for an idempotent retry. ON CONFLICT

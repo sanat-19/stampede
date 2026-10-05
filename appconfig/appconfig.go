@@ -18,6 +18,7 @@ type Config struct {
 	EventID             int64
 	RequestTimeout      time.Duration // deadline for the whole booking: pool acquire + transaction
 	SoldOutShortCircuit bool
+	LogRequests         bool // log one line per booking with its timing (off by default: costly under load)
 }
 
 var (
@@ -61,6 +62,9 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.SoldOutShortCircuit, err = envBool("SOLD_OUT_SHORT_CIRCUIT", true); err != nil {
+		return Config{}, err
+	}
+	if cfg.LogRequests, err = envBool("LOG_REQUESTS", false); err != nil {
 		return Config{}, err
 	}
 

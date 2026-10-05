@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"stampede/models"
@@ -13,17 +14,21 @@ import (
 const maxBookBodyBytes = 1 << 10
 
 type BookHandler struct {
-	booker  models.Booker
-	eventID int64
-	timeout time.Duration
+	booker      models.Booker
+	eventID     int64
+	timeout     time.Duration
+	logRequests bool // one log line per booking with its timing; off under load (logging costs CPU)
 }
 
-func NewBookHandler(booker models.Booker, eventID int64, timeout time.Duration) *BookHandler {
-	return &BookHandler{booker: booker, eventID: eventID, timeout: timeout}
+func NewBookHandler(booker models.Booker, eventID int64, timeout time.Duration, logRequests bool) *BookHandler {
+	return &BookHandler{booker: booker, eventID: eventID, timeout: timeout, logRequests: logRequests}
 }
 
-// Book serves POST /book. Every reply carries an outcome field, which k6 counts.
+// Book serves POST /book. Every reply carries an outcome field, which k6 counts,
+// and a Server-Timing header splitting the time into pool wait and DB time.
 func (h *BookHandler) Book(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	req, msg := h.decode(r)
 	if msg != "" {
 		writeJSON(w, http.StatusBadRequest, models.BookResponse{Outcome: "invalid", Error: msg})
@@ -34,23 +39,45 @@ func (h *BookHandler) Book(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	res, err := h.booker.Book(ctx, *req.EventID, *req.UserID, *req.Qty)
+
+	var status int
+	var resp models.BookResponse
 	switch {
 	case err == nil && res.Replayed:
-		writeJSON(w, http.StatusOK, models.BookResponse{Outcome: "already_booked", BookingID: res.BookingID, Tickets: res.Tickets})
+		status, resp = http.StatusOK, models.BookResponse{Outcome: "already_booked", BookingID: res.BookingID, Tickets: res.Tickets}
 	case err == nil:
-		writeJSON(w, http.StatusCreated, models.BookResponse{Outcome: "booked", BookingID: res.BookingID, Tickets: res.Tickets})
+		status, resp = http.StatusCreated, models.BookResponse{Outcome: "booked", BookingID: res.BookingID, Tickets: res.Tickets}
 	case errors.Is(err, models.ErrEventSoldOut):
-		writeJSON(w, http.StatusConflict, models.BookResponse{Outcome: "sold_out", EventSoldOut: true})
+		status, resp = http.StatusConflict, models.BookResponse{Outcome: "sold_out", EventSoldOut: true}
 	case errors.Is(err, models.ErrSoldOut):
-		writeJSON(w, http.StatusConflict, models.BookResponse{Outcome: "sold_out"})
+		status, resp = http.StatusConflict, models.BookResponse{Outcome: "sold_out"}
 	case errors.Is(err, models.ErrTimeoutPool):
-		writeJSON(w, http.StatusServiceUnavailable, models.BookResponse{Outcome: "timeout_pool"})
+		status, resp = http.StatusServiceUnavailable, models.BookResponse{Outcome: "timeout_pool"}
 	case errors.Is(err, models.ErrTimeoutDB):
-		writeJSON(w, http.StatusServiceUnavailable, models.BookResponse{Outcome: "timeout_db"})
+		status, resp = http.StatusServiceUnavailable, models.BookResponse{Outcome: "timeout_db"}
 	default:
 		slog.Error("booking failed", "event_id", *req.EventID, "user_id", *req.UserID, "qty", *req.Qty, "err", err)
-		writeJSON(w, http.StatusInternalServerError, models.BookResponse{Outcome: "error"})
+		status, resp = http.StatusInternalServerError, models.BookResponse{Outcome: "error"}
 	}
+
+	total := time.Since(start)
+	w.Header().Set("Server-Timing", fmt.Sprintf("pool;dur=%.2f, db;dur=%.2f, total;dur=%.2f",
+		ms(res.Timing.PoolWait), ms(res.Timing.DB), ms(total)))
+	if h.logRequests {
+		slog.Info("book",
+			"outcome", resp.Outcome,
+			"user_id", *req.UserID,
+			"qty", *req.Qty,
+			"pool_wait_ms", ms(res.Timing.PoolWait),
+			"db_ms", ms(res.Timing.DB),
+			"total_ms", ms(total),
+		)
+	}
+	writeJSON(w, status, resp)
+}
+
+func ms(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
 }
 
 // decode parses and validates the request, returning a non-empty message when invalid.

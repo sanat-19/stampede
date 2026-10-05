@@ -46,7 +46,7 @@ func (h *EventHandler) Availability(w http.ResponseWriter, r *http.Request) {
 
 	var remaining int64
 	if err == nil {
-		// Counted from the tickets themselves: events.remaining is no longer updated.
+		// Counted from the tickets themselves; events has no remaining counter.
 		remaining, err = h.ticketRepo.CountAvailable(ctx, eventID)
 	}
 	if err != nil {

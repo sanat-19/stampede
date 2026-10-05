@@ -75,6 +75,7 @@ func main() {
 		"db_max_conns", sqlDB.Stats().MaxOpenConnections,
 		"request_timeout", cfg.RequestTimeout.String(),
 		"sold_out_short_circuit", cfg.SoldOutShortCircuit,
+		"log_requests", cfg.LogRequests,
 	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal("HTTP server failed:", err)

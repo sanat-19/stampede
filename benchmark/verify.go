@@ -56,8 +56,8 @@ func main() {
 }
 
 func verify(db *gorm.DB, eventID int64) error {
-	// events.remaining is not checked: since Phase 2a bookings no longer update it,
-	// so the ticket rows are the source of truth for what was sold.
+	// Ticket rows are the source of truth for what was sold (events has no
+	// remaining counter since Phase 2a).
 	var event struct {
 		TotalTickets int64
 	}

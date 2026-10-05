@@ -37,6 +37,9 @@ http.setResponseCallback(http.expectedStatuses(200, 201, 409));
 
 const counters =Object.fromEntries(OUTCOMES.map((o) => [o, new Counter(`outcome_${o}`)]));
 const latency = new Trend('book_latency', true);
+// From the server's Server-Timing header: where each request's time went.
+const poolWait = new Trend('server_pool_wait', true); // waiting for a DB connection
+const dbTime = new Trend('server_db_time', true); // inside the transaction
 
 export const options = {
   scenarios: {
@@ -50,7 +53,11 @@ export const options = {
     },
   },
   // Trivial thresholds so the per-outcome latency submetrics appear in the summary.
-  thresholds: Object.fromEntries(OUTCOMES.map((o) => [`book_latency{outcome:${o}}`, ['max>=0']])),
+  thresholds: Object.fromEntries(
+    ['book_latency', 'server_pool_wait', 'server_db_time'].flatMap((m) =>
+      OUTCOMES.map((o) => [`${m}{outcome:${o}}`, ['max>=0']]),
+    ),
+  ),
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
@@ -76,11 +83,24 @@ export default function () {
 
   counters[outcome].add(1);
   latency.add(res.timings.duration, { outcome });
+  recordServerTiming(res.headers['Server-Timing'], outcome);
 
   // The server sets event_sold_out only once no ticket is left (a sold_out for
   // asking 4 with 1–3 left does not have it), so one such answer ends the test.
   if (outcome === 'sold_out' && STOP_ON_SOLD_OUT && res.json('event_sold_out') === true) {
     exec.test.abort('all tickets sold out');
+  }
+}
+
+// Parses "pool;dur=12.34, db;dur=5.67, total;dur=18.01" into the two trends.
+function recordServerTiming(header, outcome) {
+  if (!header) return;
+  for (const part of header.split(',')) {
+    const [name, dur] = part.trim().split(';dur=');
+    const value = parseFloat(dur);
+    if (Number.isNaN(value)) continue;
+    if (name === 'pool') poolWait.add(value, { outcome });
+    if (name === 'db') dbTime.add(value, { outcome });
   }
 }
 

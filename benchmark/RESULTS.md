@@ -76,6 +76,16 @@ The `bookings.event_id` foreign key is still in place (step 2).
 - 8,895 requests were in flight when k6 stopped and are not in the outcome counts; ambiguous was still only 52.
 - All 8 invariants passed; 0 unsold.
 
+## Phase 2a — step 2: event row untouched (FK + counter column dropped)
+
+Change: migration `2_remove_event_hot_row` drops the `bookings.event_id` foreign key (no more `FOR KEY SHARE`
+lock on event row 1 per booking insert) and the unused `events.remaining` column. Booking code unchanged
+from step 1.
+
+| Run | Pool | Peak RPS | Short-circuit | Peak booked/s | Avg booked/s | p99 (booked) | booked | already_booked | sold_out | timeout_pool | timeout_db | Ambiguous | k6 dropped | Unsold | Sold out after |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2a-s2-1 | 20 | 5000 | on | | | | | | | | | | | | |
+
 ## Commands
 
 Full run: reset → migrate → seed → restart API → k6 → verify → bookings/s query.

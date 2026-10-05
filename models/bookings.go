@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
@@ -64,6 +65,14 @@ type BookingResult struct {
 	BookingID int64
 	Tickets   []string
 	Replayed  bool // true for an idempotent replay of an existing booking (already_booked)
+	Timing    BookingTiming
+}
+
+// BookingTiming splits where a booking's time went. It is filled on every
+// return from Book, including errors, so timeouts can be timed too.
+type BookingTiming struct {
+	PoolWait time.Duration // waiting for a pool connection (+ the BEGIN round trip)
+	DB       time.Duration // from BEGIN to commit/rollback (0 if no connection was obtained)
 }
 
 // Booker is what the HTTP layer depends on, so later phases can add another
@@ -93,11 +102,23 @@ func (r *BookingRepo) SoldOut(eventID int64) bool {
 	return ok
 }
 
-func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) (BookingResult, error) {
+func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) (res BookingResult, err error) {
 	// Safe to reject without the DB: the flag can only reject, never approve.
 	if r.shortCircuit && r.SoldOut(eventID) {
 		return BookingResult{}, ErrEventSoldOut
 	}
+
+	// Fill the timing on whatever result is returned below.
+	start := time.Now()
+	var dbStart time.Time
+	defer func() {
+		if dbStart.IsZero() {
+			res.Timing.PoolWait = time.Since(start)
+			return
+		}
+		res.Timing.PoolWait = dbStart.Sub(start)
+		res.Timing.DB = time.Since(dbStart)
+	}()
 
 	// Begun manually rather than db.Transaction(fn) so a failure here — waiting for
 	// a pool connection — can be told apart from a failure inside the transaction.
@@ -108,6 +129,7 @@ func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) 
 		}
 		return BookingResult{}, fmt.Errorf("begin: %w", tx.Error)
 	}
+	dbStart = time.Now()
 	finished := false
 	defer func() {
 		if !finished {
@@ -118,14 +140,14 @@ func (r *BookingRepo) Book(ctx context.Context, eventID, userID int64, qty int) 
 	// The booking row. UNIQUE (event_id, user_id) makes a retry conflict
 	// instead of creating a second booking.
 	booking := Bookings{EventID: eventID, UserID: userID, Quantity: qty, Status: Confirmed}
-	res := tx.Clauses(clause.OnConflict{
+	ins := tx.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "event_id"}, {Name: "user_id"}},
 		DoNothing: true,
 	}).Create(&booking)
-	if res.Error != nil {
-		return BookingResult{}, txError(ctx, "insert booking", res.Error)
+	if ins.Error != nil {
+		return BookingResult{}, txError(ctx, "insert booking", ins.Error)
 	}
-	if res.RowsAffected == 0 {
+	if ins.RowsAffected == 0 {
 		// Release this connection before the lookup so one request never holds two.
 		tx.Rollback()
 		finished = true

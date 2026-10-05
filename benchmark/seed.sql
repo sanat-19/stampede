@@ -2,8 +2,8 @@
 -- (after reset.sql + migrate), passing N on the command line:
 --   docker exec -i stampede-db psql -U sanat -d stampede -v N=100000 < benchmark/seed.sql
 
-INSERT INTO events (id, name, total_tickets, remaining, sale_starts_at)
-VALUES (1, 'Concert 2026', :N, :N, now());
+INSERT INTO events (id, name, total_tickets, sale_starts_at)
+VALUES (1, 'Concert 2026', :N, now());
 
 INSERT INTO tickets (event_id, ticket_no)
 SELECT 1, 'GA-' || lpad(g::text, 7, '0')

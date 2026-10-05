@@ -8,11 +8,10 @@ import (
 )
 
 type Event struct {
-	ID               int64     `json:"id" gorm:"primaryKey"`
-	Name             string    `json:"name" gorm:"column:name"`
-	TotalTickets     int       `json:"total_tickets" gorm:"column:total_tickets"`
-	RemainingTickets int       `json:"remaining" gorm:"column:remaining"` // seeded only; not updated by bookings since Phase 2a (hot row removed)
-	SaleStartsAt     time.Time `json:"sale_starts_at" gorm:"column:sale_starts_at"`
+	ID           int64     `json:"id" gorm:"primaryKey"`
+	Name         string    `json:"name" gorm:"column:name"`
+	TotalTickets int       `json:"total_tickets" gorm:"column:total_tickets"`
+	SaleStartsAt time.Time `json:"sale_starts_at" gorm:"column:sale_starts_at"`
 }
 
 func (Event) TableName() string {

@@ -84,7 +84,33 @@ from step 1.
 
 | Run | Pool | Peak RPS | Short-circuit | Peak booked/s | Avg booked/s | p99 (booked) | booked | already_booked | sold_out | timeout_pool | timeout_db | Ambiguous | k6 dropped | Unsold | Sold out after |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2a-s2-1 | 20 | 5000 | on | | | | | | | | | | | | |
+| 2a-s2-1 | 20 | 5000 | on | 1,976 | 975 | 1.97 s | 39,900 | 182 | 174 | 115,648 | 4,625 | 55 | 10,232 (6%) | 0 | 40s |
+
+### 2a-s2-1 notes (2026-10-05)
+
+- Sold out in **40 s** (vs 43 s for 2a-2); peak 1,976 bookings/s (+9%), average 975/s (+7%).
+- The gain is within run-to-run noise (2a-1 vs 2a-2 peaks differed by ~5%), so the `bookings.event_id` FK was a
+  small cost at most; the counter update (step 1) was the real bottleneck.
+- All 8 invariants passed without the FK and without `events.remaining`; 0 unsold; 55 ambiguous.
+- k6 stopped at 41 s; 0 `client_error`; slowest response 2.58 s.
+
+## Phase 2a summary
+
+| | baseline-1 | 2a step 1 (2a-2) | 2a step 2 (2a-s2-1) |
+|---|---|---|---|
+| Sold out after | 2m20s | 43 s | 40 s |
+| Peak bookings/s | 618 | 1,808 | 1,976 |
+| Avg bookings/s | 283 | 908 | 975 |
+
+- Removing the shared counter row from the booking transaction (a code change) made the sale **~3× faster**.
+  Dropping the FK and the dead column added a few percent at most.
+- Correctness held in every run: ticket rows alone prevent overselling.
+- Demand at the peak (up to 5,000 req/s) is still 2–3× capacity (~1,900 bookings/s), so most peak requests
+  still end in `timeout_pool`. Making the transaction faster cannot fix that; keeping losers away from the
+  database (Phase 2b, Redis admission) can.
+- Runs so far: 2 for step 1, 1 for step 2 — short of the 3-run median.
+
+## Commands
 
 ## Commands
 
